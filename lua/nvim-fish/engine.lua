@@ -35,59 +35,70 @@ local function get_line_text(buf, lnum)
   return lines[1] or ""
 end
 
+--- Expand tabs in a string to spaces, respecting tabstop alignment.
+--- After expansion, byte positions equal display columns (for ASCII content).
+local function expand_tabs(s, tabstop)
+  local result = {}
+  local col = 0
+  for i = 1, #s do
+    local ch = s:sub(i, i)
+    if ch == "\t" then
+      local spaces = tabstop - (col % tabstop)
+      table.insert(result, string.rep(" ", spaces))
+      col = col + spaces
+    else
+      table.insert(result, ch)
+      col = col + 1
+    end
+  end
+  return table.concat(result)
+end
+
 --- Place a sprite with text-clipping.
---- row: 0-indexed buffer line
---- col: 0-indexed window column
---- sprite: the ASCII string to render
---- hl: highlight group name
---- Returns extmark params or nil if fully clipped.
-local function place_clipped(buf, row, col, sprite, hl, line_text)
-  local chunks = {}
-  local first_col = nil
+--- Returns a list of segments, each { col, chunks } for one extmark.
+--- line_text must be tab-expanded so byte positions equal display columns.
+--- @package Exposed for testing as M._place_clipped
+local function place_clipped(col, sprite, hl, line_text)
+  local segments = {}
+  local cur_col = nil
+  local cur_text = nil
 
   for i = 1, #sprite do
     local c = col + i - 1
     -- Check if this column overlaps real (non-whitespace) text
     local overlaps = false
-    if c < #line_text then
+    if c >= 0 and c < #line_text then
       local ch = line_text:sub(c + 1, c + 1)
-      if ch ~= " " and ch ~= "\t" and ch ~= "" then
+      if ch ~= " " and ch ~= "" then
         overlaps = true
       end
     end
 
     if not overlaps then
-      if first_col == nil then
-        first_col = c
-      end
-      -- Merge with previous chunk if same hl and contiguous
-      if #chunks > 0 then
-        local last = chunks[#chunks]
-        -- Always same hl, just append
-        chunks[#chunks] = { last[1] .. sprite:sub(i, i), last[2] }
+      if cur_col == nil then
+        -- Start a new segment
+        cur_col = c
+        cur_text = sprite:sub(i, i)
       else
-        chunks[1] = { sprite:sub(i, i), hl }
+        -- Extend current segment
+        cur_text = cur_text .. sprite:sub(i, i)
       end
     else
-      -- Gap — next visible char starts a new chunk
-      if #chunks > 0 or first_col ~= nil then
-        -- We need to account for the gap by inserting padding
-        -- Actually with virt_text_win_col we set the start column,
-        -- but subsequent chars just flow. We need a different approach:
-        -- pad with spaces for gaps.
-        if #chunks > 0 then
-          local last = chunks[#chunks]
-          chunks[#chunks] = { last[1] .. " ", last[2] }
-        end
+      -- Gap — finalize current segment if any
+      if cur_col ~= nil then
+        table.insert(segments, { col = cur_col, chunks = { { cur_text, hl } } })
+        cur_col = nil
+        cur_text = nil
       end
     end
   end
 
-  if first_col == nil or #chunks == 0 then
-    return nil
+  -- Finalize last segment
+  if cur_col ~= nil then
+    table.insert(segments, { col = cur_col, chunks = { { cur_text, hl } } })
   end
 
-  return first_col, chunks
+  return segments
 end
 
 local function tick()
@@ -139,6 +150,7 @@ local function tick()
       entities = alive
 
       -- Render entities
+      local tabstop = vim.bo[buf].tabstop
       for _, ent in ipairs(entities) do
         local r = ent:render()
         if r then
@@ -151,12 +163,12 @@ local function tick()
           for li, sprite_line in ipairs(sprite_lines) do
             local buf_row = (r.row + li - 1) + info.top - 1 -- 0-indexed buffer line
             if buf_row >= 0 and buf_row < line_count and #sprite_line > 0 then
-              local line_text = get_line_text(buf, buf_row)
-              local first_col, chunks = place_clipped(buf, buf_row, r.col, sprite_line, r.hl, line_text)
-              if first_col and chunks then
+              local line_text = expand_tabs(get_line_text(buf, buf_row), tabstop)
+              local segments = place_clipped(r.col, sprite_line, r.hl, line_text)
+              for _, seg in ipairs(segments) do
                 pcall(vim.api.nvim_buf_set_extmark, buf, ns, buf_row, 0, {
-                  virt_text = chunks,
-                  virt_text_win_col = first_col,
+                  virt_text = seg.chunks,
+                  virt_text_win_col = seg.col,
                   virt_text_pos = "overlay",
                   priority = 1,
                   ephemeral = false,
@@ -220,5 +232,9 @@ end
 function M.entity_count()
   return #entities
 end
+
+-- Expose internals for testing
+M._place_clipped = place_clipped
+M._expand_tabs = expand_tabs
 
 return M
