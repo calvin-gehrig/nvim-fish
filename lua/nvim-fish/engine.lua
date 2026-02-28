@@ -8,6 +8,7 @@ local entities = {}
 local spawners = {}
 local running = false
 local tick_ms = 150
+local tick_count = 0
 
 function M.register_spawner(fn)
   table.insert(spawners, fn)
@@ -99,13 +100,29 @@ local function tick()
     local ok, err = pcall(function()
       local info = get_window_info()
       local buf = info.buf
+      local win_height = info.bot - info.top + 1
+
+      tick_count = tick_count + 1
+
+      -- Build context object
+      local ctx = {
+        win_width = info.width,
+        win_height = win_height,
+        win_info = info,
+        entities = entities,
+        tick = tick_count,
+        get_visible_text = function(row)
+          local buf_row = row + info.top - 1 -- 0-indexed buffer line
+          return get_line_text(buf, buf_row)
+        end,
+      }
 
       -- Clear all previous extmarks
       vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
 
       -- Call spawners
       for _, spawner in ipairs(spawners) do
-        local new_entity = spawner(info)
+        local new_entity = spawner(ctx)
         if new_entity then
           table.insert(entities, new_entity)
         end
@@ -114,7 +131,7 @@ local function tick()
       -- Update entities (remove dead ones)
       local alive = {}
       for _, ent in ipairs(entities) do
-        local keep = ent:update(info.width, info.bot - info.top + 1)
+        local keep = ent:update(ctx)
         if keep then
           table.insert(alive, ent)
         end
@@ -127,19 +144,24 @@ local function tick()
         if r then
           -- r = {row, col, sprite, hl}
           -- row is relative to visible window (0-indexed from window top)
-          local buf_row = r.row + info.top - 1 -- convert to 0-indexed buffer line
+          -- sprite may contain newlines for multiline entities
+          local sprite_lines = vim.split(r.sprite, "\n", { plain = true })
           local line_count = vim.api.nvim_buf_line_count(buf)
-          if buf_row >= 0 and buf_row < line_count then
-            local line_text = get_line_text(buf, buf_row)
-            local first_col, chunks = place_clipped(buf, buf_row, r.col, r.sprite, r.hl, line_text)
-            if first_col and chunks then
-              pcall(vim.api.nvim_buf_set_extmark, buf, ns, buf_row, 0, {
-                virt_text = chunks,
-                virt_text_win_col = first_col,
-                virt_text_pos = "overlay",
-                priority = 1,
-                ephemeral = false,
-              })
+
+          for li, sprite_line in ipairs(sprite_lines) do
+            local buf_row = (r.row + li - 1) + info.top - 1 -- 0-indexed buffer line
+            if buf_row >= 0 and buf_row < line_count and #sprite_line > 0 then
+              local line_text = get_line_text(buf, buf_row)
+              local first_col, chunks = place_clipped(buf, buf_row, r.col, sprite_line, r.hl, line_text)
+              if first_col and chunks then
+                pcall(vim.api.nvim_buf_set_extmark, buf, ns, buf_row, 0, {
+                  virt_text = chunks,
+                  virt_text_win_col = first_col,
+                  virt_text_pos = "overlay",
+                  priority = 1,
+                  ephemeral = false,
+                })
+              end
             end
           end
         end
@@ -184,6 +206,7 @@ function M.stop()
   end)
 
   entities = {}
+  tick_count = 0
 end
 
 function M.toggle(opts)

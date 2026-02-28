@@ -5,9 +5,7 @@ local engine = require("nvim-fish.engine")
 
 local M = {}
 
--- ><> points RIGHT — used when swimming left-to-right
--- <>< points LEFT  — used when swimming right-to-left
-local sprites = {
+local default_sprites = {
   right = "><>",
   left = "<><",
 }
@@ -17,7 +15,8 @@ function M.register(opts)
     max_fish = opts.max_fish,
     spawn_chance = opts.spawn_chance,
     hl_group = opts.hl_group,
-    sprites = sprites,
+    sprites = opts.sprites or default_sprites,
+    behaviour = opts.behaviour,
   }, engine)
 
   engine.register_spawner(spawner)
